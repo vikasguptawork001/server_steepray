@@ -9,7 +9,11 @@ const router = express.Router();
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const { page = 1, limit = 200, search = '', searchField = '' } = req.query;
-    const offset = (page - 1) * limit;
+    
+    // Ensure page and limit are valid integers
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.max(1, Math.min(1000, parseInt(limit) || 200)); // Max 1000 items per page
+    const offset = (pageNum - 1) * limitNum;
 
     let query = 'SELECT * FROM items WHERE 1=1';
     const params = [];
@@ -27,8 +31,9 @@ router.get('/', authenticateToken, async (req, res) => {
       }
     }
 
-    query += ' ORDER BY id DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), parseInt(offset));
+    // Use template literals for LIMIT/OFFSET since they're validated integers
+    // This avoids MySQL parameterization issues with LIMIT/OFFSET
+    query += ` ORDER BY id DESC LIMIT ${limitNum} OFFSET ${offset}`;
 
     const [items] = await pool.execute(query, params);
 
@@ -53,10 +58,10 @@ router.get('/', authenticateToken, async (req, res) => {
     res.json({
       items,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
         total,
-        totalPages: Math.ceil(total / limit)
+        totalPages: Math.ceil(total / limitNum)
       }
     });
   } catch (error) {
