@@ -1,9 +1,16 @@
 const express = require('express');
+const multer = require('multer');
 const pool = require('../config/database');
 const { authenticateToken, authorizeRole } = require('../middleware/auth');
 const { validateItem } = require('../middleware/validation');
 
 const router = express.Router();
+
+// Configure multer for image uploads (3MB limit)
+const upload = multer({
+  limits: { fileSize: 3 * 1024 * 1024 }, // 3MB
+  storage: multer.memoryStorage()
+});
 
 // Get all items with pagination and search
 router.get('/', authenticateToken, async (req, res) => {
@@ -12,7 +19,12 @@ router.get('/', authenticateToken, async (req, res) => {
     
     // Ensure page and limit are valid integers
     const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.max(1, Math.min(1000, parseInt(limit) || 200)); // Max 1000 items per page
+    let limitNum;
+    if (limit === 'all') {
+      limitNum = 999999; // Very large number for "all"
+    } else {
+      limitNum = Math.max(1, Math.min(10000, parseInt(limit) || 200));
+    }
     const offset = (pageNum - 1) * limitNum;
 
     let query = 'SELECT * FROM items WHERE 1=1';
@@ -28,6 +40,9 @@ router.get('/', authenticateToken, async (req, res) => {
       } else if (searchField === 'product_code') {
         query += ' AND product_code LIKE ?';
         params.push(`%${search}%`);
+      } else if (searchField === 'remarks') {
+        query += ' AND remarks LIKE ?';
+        params.push(`%${search}%`);
       }
     }
 
@@ -36,6 +51,18 @@ router.get('/', authenticateToken, async (req, res) => {
     query += ` ORDER BY id DESC LIMIT ${limitNum} OFFSET ${offset}`;
 
     const [items] = await pool.execute(query, params);
+
+    // Remove image blob and purchase_rate based on role
+    const processedItems = items.map(item => {
+      const processed = { ...item };
+      // Remove image blob (too large for list)
+      delete processed.image;
+      // Remove purchase_rate if not super admin
+      if (req.user.role !== 'super_admin') {
+        delete processed.purchase_rate;
+      }
+      return processed;
+    });
 
     // Get total count
     let countQuery = 'SELECT COUNT(*) as total FROM items WHERE 1=1';
@@ -50,13 +77,16 @@ router.get('/', authenticateToken, async (req, res) => {
       } else if (searchField === 'product_code') {
         countQuery += ' AND product_code LIKE ?';
         countParams.push(`%${search}%`);
+      } else if (searchField === 'remarks') {
+        countQuery += ' AND remarks LIKE ?';
+        countParams.push(`%${search}%`);
       }
     }
     const [countResult] = await pool.execute(countQuery, countParams);
     const total = countResult[0].total;
 
     res.json({
-      items,
+      items: processedItems,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -73,7 +103,7 @@ router.get('/', authenticateToken, async (req, res) => {
 // Advanced search with multiple conditions
 router.post('/advanced-search', authenticateToken, async (req, res) => {
   try {
-    const { product_name, brand, product_code } = req.body;
+    const { product_name, brand, product_code, remarks } = req.body;
     
     let query = 'SELECT * FROM items WHERE 1=1';
     const params = [];
@@ -90,11 +120,26 @@ router.post('/advanced-search', authenticateToken, async (req, res) => {
       query += ' AND product_code LIKE ?';
       params.push(`%${product_code}%`);
     }
+    if (remarks) {
+      query += ' AND remarks LIKE ?';
+      params.push(`%${remarks}%`);
+    }
 
     query += ' ORDER BY id DESC';
 
     const [items] = await pool.execute(query, params);
-    res.json({ items });
+    
+    // Remove image blob and purchase_rate based on role
+    const processedItems = items.map(item => {
+      const processed = { ...item };
+      delete processed.image;
+      if (req.user.role !== 'super_admin') {
+        delete processed.purchase_rate;
+      }
+      return processed;
+    });
+    
+    res.json({ items: processedItems });
   } catch (error) {
     console.error('Advanced search error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -111,8 +156,8 @@ router.get('/search', authenticateToken, async (req, res) => {
     }
 
     const [items] = await pool.execute(
-      'SELECT id, product_name, product_code, brand, quantity, sale_rate FROM items WHERE product_name LIKE ? OR product_code LIKE ? LIMIT 10',
-      [`%${q}%`, `%${q}%`]
+      'SELECT id, product_name, product_code, brand, quantity, sale_rate FROM items WHERE product_name LIKE ? OR product_code LIKE ? OR brand LIKE ? OR remarks LIKE ? LIMIT 10',
+      [`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`]
     );
 
     res.json({ items });
@@ -125,19 +170,96 @@ router.get('/search', authenticateToken, async (req, res) => {
 // Get single item
 router.get('/:id', authenticateToken, async (req, res) => {
   try {
-    const [items] = await pool.execute('SELECT * FROM items WHERE id = ?', [req.params.id]);
+    const [items] = await pool.execute(
+      `SELECT i.*, 
+       u1.user_id as created_by_user, 
+       u2.user_id as updated_by_user
+       FROM items i
+       LEFT JOIN users u1 ON i.created_by = u1.user_id
+       LEFT JOIN users u2 ON i.updated_by = u2.user_id
+       WHERE i.id = ?`,
+      [req.params.id]
+    );
     if (items.length === 0) {
       return res.status(404).json({ error: 'Item not found' });
     }
-    res.json({ item: items[0] });
+    const item = items[0];
+    // Convert image blob to base64 if exists
+    if (item.image) {
+      item.image_base64 = item.image.toString('base64');
+      delete item.image; // Remove blob from response
+    }
+    // Format timestamps
+    if (item.created_at) {
+      item.created_at_formatted = new Date(item.created_at).toLocaleString();
+    }
+    if (item.updated_at) {
+      item.updated_at_formatted = new Date(item.updated_at).toLocaleString();
+    }
+    res.json({ item });
   } catch (error) {
     console.error('Get item error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
+// Helper function to check for duplicates
+async function checkDuplicate(product_name, product_code, brand, excludeId = null) {
+  let query = `SELECT id FROM items WHERE (
+    (product_name = ? AND product_code = ? AND brand = ?) OR
+    (product_name = ? AND product_code = ? AND brand IS NULL AND ? IS NULL) OR
+    (product_name = ? AND product_code IS NULL AND ? IS NULL AND brand = ?) OR
+    (product_name = ? AND product_code IS NULL AND ? IS NULL AND brand IS NULL AND ? IS NULL)
+  )`;
+  const params = [
+    product_name, product_code, brand,
+    product_name, product_code, brand,
+    product_name, product_code, brand,
+    product_name, product_code, brand
+  ];
+  
+  if (excludeId) {
+    query += ' AND id != ?';
+    params.push(parseInt(excludeId)); // Ensure it's an integer
+  }
+  
+  const [duplicates] = await pool.execute(query, params);
+  return duplicates.length > 0;
+}
+
+// Helper function to save item history
+async function saveItemHistory(itemId, itemData, actionType, userId) {
+  try {
+    await pool.execute(
+      `INSERT INTO items_history 
+      (item_id, product_name, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, 
+       quantity, alert_quantity, rack_number, remarks, action_type, changed_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        itemId,
+        itemData.product_name,
+        itemData.product_code || null,
+        itemData.brand || null,
+        itemData.hsn_number || null,
+        itemData.tax_rate || 0,
+        itemData.sale_rate,
+        itemData.purchase_rate,
+        itemData.quantity || 0,
+        itemData.alert_quantity || 0,
+        itemData.rack_number || null,
+        itemData.remarks || null,
+        actionType,
+        userId
+      ]
+    );
+  } catch (error) {
+    console.error('Error saving item history:', error);
+    // Don't throw - history is not critical
+  }
+}
+
 // Add new item (only admin and super_admin)
-router.post('/', authenticateToken, authorizeRole('admin', 'super_admin'), validateItem, async (req, res) => {
+router.post('/', authenticateToken, authorizeRole('admin', 'super_admin'), upload.single('image'), async (req, res) => {
   try {
     const {
       product_name,
@@ -148,7 +270,8 @@ router.post('/', authenticateToken, authorizeRole('admin', 'super_admin'), valid
       sale_rate,
       purchase_rate,
       alert_quantity,
-      rack_number
+      rack_number,
+      remarks
     } = req.body;
 
     // Validation
@@ -164,9 +287,46 @@ router.post('/', authenticateToken, authorizeRole('admin', 'super_admin'), valid
       return res.status(400).json({ error: 'Purchase rate is required and must be a positive number' });
     }
 
+    // Validate sale_rate >= purchase_rate
+    const saleRateNum = parseFloat(sale_rate);
+    const purchaseRateNum = parseFloat(purchase_rate);
+    if (saleRateNum < purchaseRateNum) {
+      return res.status(400).json({ error: 'Sale rate must be greater than or equal to purchase rate' });
+    }
+
+    // Validate remarks length
+    if (remarks && remarks.length > 200) {
+      return res.status(400).json({ error: 'Remarks must be 200 characters or less' });
+    }
+
+    // Check for duplicates (Product Name, Product Code, Brand combination)
+    const isDuplicate = await checkDuplicate(
+      product_name.trim(),
+      product_code ? product_code.trim() : null,
+      brand ? brand.trim() : null
+    );
+    
+    if (isDuplicate) {
+      return res.status(400).json({ 
+        error: 'A product with the same Product Name, Product Code, and Brand already exists' 
+      });
+    }
+
+    // Handle image upload
+    let imageBuffer = null;
+    if (req.file) {
+      if (req.file.size > 3 * 1024 * 1024) {
+        return res.status(400).json({ error: 'Image size must be less than 3MB' });
+      }
+      imageBuffer = req.file.buffer;
+    }
+
+    const userId = req.user.user_id;
+
     const [result] = await pool.execute(
-      `INSERT INTO items (product_name, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, quantity, alert_quantity, rack_number)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      `INSERT INTO items (product_name, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, 
+       quantity, alert_quantity, rack_number, remarks, image, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
       [
         product_name.trim(),
         product_code ? product_code.trim() : null,
@@ -176,17 +336,30 @@ router.post('/', authenticateToken, authorizeRole('admin', 'super_admin'), valid
         sale_rate,
         purchase_rate,
         alert_quantity || 0,
-        rack_number ? rack_number.trim() : null
+        rack_number ? rack_number.trim() : null,
+        remarks ? remarks.trim().substring(0, 200) : null,
+        imageBuffer,
+        userId
       ]
     );
 
     // Fetch the created item to return complete data
     const [items] = await pool.execute('SELECT * FROM items WHERE id = ?', [result.insertId]);
+    const newItem = items[0];
+    
+    // Save history
+    await saveItemHistory(result.insertId, newItem, 'created', userId);
+    
+    // Remove image blob from response
+    if (newItem.image) {
+      newItem.image_base64 = newItem.image.toString('base64');
+      delete newItem.image;
+    }
     
     res.json({ 
       message: 'Item added successfully', 
       id: result.insertId,
-      item: items[0]
+      item: newItem
     });
   } catch (error) {
     console.error('Add item error:', error);
@@ -198,7 +371,7 @@ router.post('/', authenticateToken, authorizeRole('admin', 'super_admin'), valid
 });
 
 // Update item (admin and super_admin can update, only super_admin can edit purchase rate)
-router.put('/:id', authenticateToken, authorizeRole('admin', 'super_admin'), async (req, res) => {
+router.put('/:id', authenticateToken, authorizeRole('admin', 'super_admin'), upload.single('image'), async (req, res) => {
   try {
     const {
       product_name,
@@ -210,7 +383,8 @@ router.put('/:id', authenticateToken, authorizeRole('admin', 'super_admin'), asy
       purchase_rate,
       quantity,
       alert_quantity,
-      rack_number
+      rack_number,
+      remarks
     } = req.body;
 
     // Validation
@@ -230,6 +404,30 @@ router.put('/:id', authenticateToken, authorizeRole('admin', 'super_admin'), asy
       return res.status(400).json({ error: 'Quantity is required and must be 0 or greater' });
     }
 
+    // Validate sale_rate >= purchase_rate
+    // Get current purchase_rate if not being updated
+    let currentPurchaseRate = purchase_rate;
+    if (currentPurchaseRate === undefined && req.user.role !== 'super_admin') {
+      // If not super admin and purchase_rate not provided, get from existing item
+      const [existingItems] = await pool.execute('SELECT purchase_rate FROM items WHERE id = ?', [req.params.id]);
+      if (existingItems.length > 0) {
+        currentPurchaseRate = existingItems[0].purchase_rate;
+      }
+    }
+    
+    if (currentPurchaseRate !== undefined && !isNaN(currentPurchaseRate)) {
+      const saleRateNum = parseFloat(sale_rate);
+      const purchaseRateNum = parseFloat(currentPurchaseRate);
+      if (saleRateNum < purchaseRateNum) {
+        return res.status(400).json({ error: 'Sale rate must be greater than or equal to purchase rate' });
+      }
+    }
+
+    // Validate remarks length
+    if (remarks && remarks.length > 200) {
+      return res.status(400).json({ error: 'Remarks must be 200 characters or less' });
+    }
+
     // Check if user is super admin for purchase_rate update
     if (purchase_rate !== undefined && req.user.role !== 'super_admin') {
       return res.status(403).json({ error: 'Only super admin can update purchase rate' });
@@ -245,9 +443,22 @@ router.put('/:id', authenticateToken, authorizeRole('admin', 'super_admin'), asy
       return res.status(404).json({ error: 'Item not found' });
     }
 
-    let query = `UPDATE items SET 
-      product_name = ?, product_code = ?, brand = ?, hsn_number = ?, tax_rate = ?, 
-      sale_rate = ?, quantity = ?, alert_quantity = ?, rack_number = ?`;
+    // Check for duplicates (Product Name, Product Code, Brand combination) - exclude current item
+    const isDuplicate = await checkDuplicate(
+      product_name.trim(),
+      product_code ? product_code.trim() : null,
+      brand ? brand.trim() : null,
+      req.params.id
+    );
+    
+    if (isDuplicate) {
+      return res.status(400).json({ 
+        error: 'A product with the same Product Name, Product Code, and Brand already exists' 
+      });
+    }
+
+    // Handle image upload
+    let imageUpdate = '';
     const params = [
       product_name.trim(),
       product_code ? product_code.trim() : null,
@@ -257,8 +468,23 @@ router.put('/:id', authenticateToken, authorizeRole('admin', 'super_admin'), asy
       sale_rate,
       quantity,
       alert_quantity || 0,
-      rack_number ? rack_number.trim() : null
+      rack_number ? rack_number.trim() : null,
+      remarks ? remarks.trim().substring(0, 200) : null
     ];
+
+    if (req.file) {
+      if (req.file.size > 3 * 1024 * 1024) {
+        return res.status(400).json({ error: 'Image size must be less than 3MB' });
+      }
+      imageUpdate = ', image = ?';
+      params.push(req.file.buffer);
+    }
+
+    let query = `UPDATE items SET 
+      product_name = ?, product_code = ?, brand = ?, hsn_number = ?, tax_rate = ?, 
+      sale_rate = ?, quantity = ?, alert_quantity = ?, rack_number = ?, remarks = ?, updated_by = ?${imageUpdate}`;
+    
+    params.push(req.user.user_id);
 
     if (purchase_rate !== undefined && req.user.role === 'super_admin') {
       query += ', purchase_rate = ?';
@@ -271,25 +497,38 @@ router.put('/:id', authenticateToken, authorizeRole('admin', 'super_admin'), asy
     await pool.execute(query, params);
     
     // Check if quantity reached alert quantity and update order sheet
-    if (quantity <= (alert_quantity || existingItems[0].alert_quantity)) {
+    const finalAlertQty = alert_quantity !== undefined ? alert_quantity : existingItems[0].alert_quantity;
+    if (quantity <= finalAlertQty) {
+      // Calculate required quantity (alert_quantity - current_quantity, minimum 1)
+      const requiredQty = Math.max(1, finalAlertQty - quantity);
       await pool.execute(
         'INSERT INTO order_sheet (item_id, required_quantity, current_quantity, status) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE required_quantity = ?, current_quantity = ?, status = ?',
-        [req.params.id, alert_quantity || existingItems[0].alert_quantity, quantity, 'pending', alert_quantity || existingItems[0].alert_quantity, quantity, 'pending']
+        [req.params.id, requiredQty, quantity, 'pending', requiredQty, quantity, 'pending']
       );
     } else {
       // Remove from order sheet if quantity is above alert
       await pool.execute(
-        'UPDATE order_sheet SET status = ? WHERE item_id = ? AND status = ?',
-        ['completed', req.params.id, 'pending']
+        'DELETE FROM order_sheet WHERE item_id = ? AND status = ?',
+        [req.params.id, 'pending']
       );
     }
     
     // Fetch updated item
     const [updatedItems] = await pool.execute('SELECT * FROM items WHERE id = ?', [req.params.id]);
+    const updatedItem = updatedItems[0];
+    
+    // Save history
+    await saveItemHistory(req.params.id, updatedItem, 'updated', req.user.user_id);
+    
+    // Remove image blob from response
+    if (updatedItem.image) {
+      updatedItem.image_base64 = updatedItem.image.toString('base64');
+      delete updatedItem.image;
+    }
     
     res.json({ 
       message: 'Item updated successfully',
-      item: updatedItems[0]
+      item: updatedItem
     });
   } catch (error) {
     console.error('Update item error:', error);
@@ -306,6 +545,15 @@ router.delete('/:id', authenticateToken, async (req, res) => {
     if (req.user.role !== 'super_admin') {
       return res.status(403).json({ error: 'Only super admin can delete items' });
     }
+
+    // Get item data before deletion for history
+    const [items] = await pool.execute('SELECT * FROM items WHERE id = ?', [req.params.id]);
+    if (items.length === 0) {
+      return res.status(404).json({ error: 'Item not found' });
+    }
+
+    // Save history before deletion
+    await saveItemHistory(req.params.id, items[0], 'deleted', req.user.user_id);
 
     await pool.execute('DELETE FROM items WHERE id = ?', [req.params.id]);
     res.json({ message: 'Item deleted successfully' });
@@ -329,13 +577,21 @@ router.post('/purchase', authenticateToken, authorizeRole('admin', 'super_admin'
 
     try {
       for (const item of items) {
-        const { item_id, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, quantity, alert_quantity, rack_number } = item;
+        const { item_id, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, quantity, alert_quantity, rack_number, remarks } = item;
+
+        // Validate sale_rate >= purchase_rate
+        const saleRateNum = parseFloat(sale_rate);
+        const purchaseRateNum = parseFloat(purchase_rate);
+        if (isNaN(saleRateNum) || isNaN(purchaseRateNum) || saleRateNum < purchaseRateNum) {
+          await connection.rollback();
+          return res.status(400).json({ error: `Sale rate must be greater than or equal to purchase rate for item: ${item.product_name || 'Unknown'}` });
+        }
 
         if (item_id) {
           // Update existing item
           await connection.execute(
-            'UPDATE items SET quantity = quantity + ?, product_code = ?, brand = ?, hsn_number = ?, tax_rate = ?, sale_rate = ?, purchase_rate = ?, alert_quantity = ?, rack_number = ? WHERE id = ?',
-            [quantity, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, alert_quantity, rack_number, item_id]
+            'UPDATE items SET quantity = quantity + ?, product_code = ?, brand = ?, hsn_number = ?, tax_rate = ?, sale_rate = ?, purchase_rate = ?, alert_quantity = ?, rack_number = ?, remarks = ? WHERE id = ?',
+            [quantity, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, alert_quantity, rack_number, remarks || null, item_id]
           );
 
           // Record purchase transaction
@@ -346,8 +602,8 @@ router.post('/purchase', authenticateToken, authorizeRole('admin', 'super_admin'
         } else {
           // Create new item
           const [result] = await connection.execute(
-            'INSERT INTO items (product_name, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, quantity, alert_quantity, rack_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [item.product_name, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, quantity, alert_quantity, rack_number]
+            'INSERT INTO items (product_name, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, quantity, alert_quantity, rack_number, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [item.product_name, product_code, brand, hsn_number, tax_rate, sale_rate, purchase_rate, quantity, alert_quantity, rack_number, remarks || null]
           );
 
           // Record purchase transaction
@@ -377,6 +633,26 @@ router.post('/purchase', authenticateToken, authorizeRole('admin', 'super_admin'
     }
   } catch (error) {
     console.error('Purchase items error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get total stock amount (sum of purchase_rate * quantity) - super admin only
+router.get('/stock/total-amount', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'super_admin') {
+      return res.status(403).json({ error: 'Only super admin can view total stock amount' });
+    }
+
+    const [result] = await pool.execute(
+      'SELECT SUM(purchase_rate * quantity) as total_stock_amount FROM items'
+    );
+
+    res.json({ 
+      total_stock_amount: result[0].total_stock_amount || 0 
+    });
+  } catch (error) {
+    console.error('Get total stock amount error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

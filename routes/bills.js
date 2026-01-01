@@ -9,7 +9,7 @@ const router = express.Router();
 router.get('/:id/pdf', authenticateToken, async (req, res) => {
   try {
     const [transactions] = await pool.execute(
-      `SELECT st.*, sp.party_name, sp.mobile_number, sp.address, sp.email 
+      `SELECT st.*, sp.party_name, sp.mobile_number, sp.address, sp.email, sp.gst_number 
        FROM sale_transactions st 
        JOIN seller_parties sp ON st.seller_party_id = sp.id 
        WHERE st.id = ?`,
@@ -21,7 +21,7 @@ router.get('/:id/pdf', authenticateToken, async (req, res) => {
     }
 
     const [items] = await pool.execute(
-      `SELECT si.*, i.product_name, i.brand, i.hsn_number 
+      `SELECT si.*, i.product_name, i.product_code, i.brand, i.hsn_number, i.tax_rate 
        FROM sale_items si 
        JOIN items i ON si.item_id = i.id 
        WHERE si.sale_transaction_id = ?`,

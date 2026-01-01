@@ -8,16 +8,19 @@ const router = express.Router();
 // Get sales report
 router.get('/sales', authenticateToken, async (req, res) => {
   try {
-    const { from_date, to_date } = req.query;
+    const { from_date, to_date, gst_filter } = req.query; // gst_filter: 'all', 'with_gst', 'without_gst'
     
     let query = `SELECT 
+      st.id,
       st.transaction_date,
       st.bill_number,
       sp.party_name,
       st.total_amount,
       st.paid_amount,
       st.balance_amount,
-      st.payment_status
+      st.payment_status,
+      st.with_gst,
+      st.previous_balance_paid
     FROM sale_transactions st 
     JOIN seller_parties sp ON st.seller_party_id = sp.id 
     WHERE 1=1`;
@@ -33,6 +36,13 @@ router.get('/sales', authenticateToken, async (req, res) => {
     if (to_date) {
       query += ' AND st.transaction_date <= ?';
       params.push(to_date);
+    }
+
+    // Filter by GST status
+    if (gst_filter === 'with_gst') {
+      query += ' AND st.with_gst = 1';
+    } else if (gst_filter === 'without_gst') {
+      query += ' AND st.with_gst = 0';
     }
 
     query += ' ORDER BY st.transaction_date DESC, st.id DESC';
@@ -69,6 +79,10 @@ router.get('/sales', authenticateToken, async (req, res) => {
       }
     }
 
+    // Count bills with and without GST
+    const withGstCount = transactions.filter(t => t.with_gst === 1 || t.with_gst === true).length;
+    const withoutGstCount = transactions.filter(t => t.with_gst === 0 || t.with_gst === false).length;
+
     res.json({
       transactions,
       summary: {
@@ -76,7 +90,9 @@ router.get('/sales', authenticateToken, async (req, res) => {
         totalPaid,
         totalBalance,
         totalProfit: req.user.role === 'super_admin' ? totalProfit : null,
-        totalTransactions: transactions.length
+        totalTransactions: transactions.length,
+        withGstCount,
+        withoutGstCount
       }
     });
   } catch (error) {
@@ -173,18 +189,20 @@ router.get('/sales/export', authenticateToken, async (req, res) => {
 // Get return report
 router.get('/returns', authenticateToken, async (req, res) => {
   try {
-    const { from_date, to_date } = req.query;
+    const { from_date, to_date, party_type } = req.query;
     
     let query = `SELECT 
       rt.return_date,
-      sp.party_name,
+      rt.party_type,
+      COALESCE(sp.party_name, bp.party_name) as party_name,
       i.product_name,
       i.brand,
       rt.quantity,
       rt.return_amount,
       rt.reason
     FROM return_transactions rt 
-    JOIN seller_parties sp ON rt.seller_party_id = sp.id 
+    LEFT JOIN seller_parties sp ON rt.seller_party_id = sp.id 
+    LEFT JOIN buyer_parties bp ON rt.buyer_party_id = bp.id
     JOIN items i ON rt.item_id = i.id 
     WHERE 1=1`;
     const params = [];
@@ -199,6 +217,11 @@ router.get('/returns', authenticateToken, async (req, res) => {
     if (to_date) {
       query += ' AND rt.return_date <= ?';
       params.push(to_date);
+    }
+
+    if (party_type) {
+      query += ' AND rt.party_type = ?';
+      params.push(party_type);
     }
 
     query += ' ORDER BY rt.return_date DESC';
@@ -223,18 +246,20 @@ router.get('/returns', authenticateToken, async (req, res) => {
 // Export return report to Excel
 router.get('/returns/export', authenticateToken, async (req, res) => {
   try {
-    const { from_date, to_date } = req.query;
+    const { from_date, to_date, party_type } = req.query;
     
     let query = `SELECT 
       rt.return_date,
-      sp.party_name,
+      COALESCE(sp.party_name, bp.party_name) as party_name,
+      rt.party_type,
       i.product_name,
       i.brand,
       rt.quantity,
       rt.return_amount,
       rt.reason
     FROM return_transactions rt 
-    JOIN seller_parties sp ON rt.seller_party_id = sp.id 
+    LEFT JOIN seller_parties sp ON rt.seller_party_id = sp.id 
+    LEFT JOIN buyer_parties bp ON rt.buyer_party_id = bp.id
     JOIN items i ON rt.item_id = i.id 
     WHERE 1=1`;
     const params = [];
@@ -251,6 +276,11 @@ router.get('/returns/export', authenticateToken, async (req, res) => {
       params.push(to_date);
     }
 
+    if (party_type) {
+      query += ' AND rt.party_type = ?';
+      params.push(party_type);
+    }
+
     query += ' ORDER BY rt.return_date DESC';
 
     const [transactions] = await pool.execute(query, params);
@@ -260,6 +290,7 @@ router.get('/returns/export', authenticateToken, async (req, res) => {
 
     worksheet.columns = [
       { header: 'Date', key: 'date', width: 12 },
+      { header: 'Party Type', key: 'party_type', width: 12 },
       { header: 'Party Name', key: 'party_name', width: 30 },
       { header: 'Product Name', key: 'product_name', width: 30 },
       { header: 'Brand', key: 'brand', width: 20 },
@@ -271,6 +302,7 @@ router.get('/returns/export', authenticateToken, async (req, res) => {
     transactions.forEach(txn => {
       worksheet.addRow({
         date: txn.return_date,
+        party_type: txn.party_type === 'buyer' ? 'Buyer' : 'Seller',
         party_name: txn.party_name,
         product_name: txn.product_name,
         brand: txn.brand,
@@ -299,6 +331,8 @@ router.get('/returns/export', authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
+
+
 
 
 

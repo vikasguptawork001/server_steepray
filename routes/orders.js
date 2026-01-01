@@ -8,6 +8,34 @@ const router = express.Router();
 // Get order sheet items
 router.get('/', authenticateToken, async (req, res) => {
   try {
+    // First, update order sheet based on current item quantities and alert quantities
+    await pool.execute(
+      `UPDATE order_sheet os
+       INNER JOIN items i ON os.item_id = i.id
+       SET os.current_quantity = i.quantity,
+           os.required_quantity = GREATEST(1, i.alert_quantity - i.quantity)
+       WHERE os.status = 'pending' AND i.quantity <= i.alert_quantity`
+    );
+    
+    // Remove items from order sheet if quantity is now above alert
+    await pool.execute(
+      `DELETE os FROM order_sheet os
+       INNER JOIN items i ON os.item_id = i.id
+       WHERE os.status = 'pending' AND i.quantity > i.alert_quantity`
+    );
+    
+    // Also automatically add items to order sheet if they meet the criteria
+    await pool.execute(
+      `INSERT INTO order_sheet (item_id, required_quantity, current_quantity, status)
+       SELECT i.id, GREATEST(1, i.alert_quantity - i.quantity), i.quantity, 'pending'
+       FROM items i
+       WHERE i.quantity <= i.alert_quantity 
+         AND i.alert_quantity > 0
+         AND NOT EXISTS (
+           SELECT 1 FROM order_sheet os WHERE os.item_id = i.id AND os.status = 'pending'
+         )`
+    );
+
     const [orders] = await pool.execute(
       `SELECT os.*, i.product_name, i.brand, i.product_code, i.rack_number, i.sale_rate
        FROM order_sheet os
@@ -23,15 +51,16 @@ router.get('/', authenticateToken, async (req, res) => {
   }
 });
 
-// Mark order as completed
+// Mark order as completed (delete from order_sheet)
 router.put('/:id/complete', authenticateToken, async (req, res) => {
   try {
+    // Delete the order from order_sheet instead of just marking as completed
     await pool.execute(
-      'UPDATE order_sheet SET status = ? WHERE id = ?',
-      ['completed', req.params.id]
+      'DELETE FROM order_sheet WHERE id = ?',
+      [req.params.id]
     );
 
-    res.json({ message: 'Order marked as completed' });
+    res.json({ message: 'Order marked as completed and removed from order sheet' });
   } catch (error) {
     console.error('Complete order error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -86,6 +115,8 @@ router.get('/export', authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
+
+
 
 
 

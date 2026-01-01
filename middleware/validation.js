@@ -36,6 +36,13 @@ const validateItem = (req, res, next) => {
     return res.status(400).json({ error: 'Purchase rate is required and must be a positive number' });
   }
 
+  // Validate sale_rate >= purchase_rate
+  const saleRateNum = parseFloat(sale_rate);
+  const purchaseRateNum = parseFloat(purchase_rate);
+  if (saleRateNum < purchaseRateNum) {
+    return res.status(400).json({ error: 'Sale rate must be greater than or equal to purchase rate' });
+  }
+
   // Sanitize inputs
   if (req.body.product_name) req.body.product_name = sanitizeString(req.body.product_name);
   if (req.body.product_code) req.body.product_code = sanitizeString(req.body.product_code);
@@ -123,9 +130,9 @@ const validateRegister = (req, res, next) => {
 };
 
 const validateTransaction = (req, res, next) => {
-  const { seller_party_id, items, payment_status, paid_amount } = req.body;
+  const { seller_party_id, items, payment_status, paid_amount, with_gst, previous_balance_paid } = req.body;
 
-  if (!seller_party_id || isNaN(seller_party_id)) {
+  if (!seller_party_id || isNaN(seller_party_id) || seller_party_id <= 0) {
     return res.status(400).json({ error: 'Valid seller party ID is required' });
   }
 
@@ -133,15 +140,46 @@ const validateTransaction = (req, res, next) => {
     return res.status(400).json({ error: 'At least one item is required' });
   }
 
+  // Check for duplicate items
+  const itemIds = items.map(item => item.item_id);
+  const uniqueItemIds = new Set(itemIds);
+  if (itemIds.length !== uniqueItemIds.size) {
+    return res.status(400).json({ error: 'Duplicate items are not allowed. Please combine quantities for the same item.' });
+  }
+
   for (const item of items) {
-    if (!item.item_id || isNaN(item.item_id)) {
+    if (!item.item_id || isNaN(item.item_id) || item.item_id <= 0) {
       return res.status(400).json({ error: 'Valid item ID is required for all items' });
     }
     if (!item.quantity || isNaN(item.quantity) || item.quantity <= 0) {
       return res.status(400).json({ error: 'Valid quantity (greater than 0) is required for all items' });
     }
-    if (!item.sale_rate || isNaN(item.sale_rate) || item.sale_rate < 0) {
-      return res.status(400).json({ error: 'Valid sale rate is required for all items' });
+    if (item.quantity % 1 !== 0) {
+      return res.status(400).json({ error: 'Quantity must be a whole number' });
+    }
+    if (item.sale_rate === undefined || item.sale_rate === null || isNaN(item.sale_rate) || item.sale_rate < 0) {
+      return res.status(400).json({ error: 'Valid sale rate (>= 0) is required for all items' });
+    }
+    
+    // Validate discount
+    if (item.discount !== undefined && item.discount !== null) {
+      const discount = parseFloat(item.discount);
+      if (isNaN(discount) || discount < 0) {
+        return res.status(400).json({ error: 'Discount must be a non-negative number' });
+      }
+    }
+    
+    // Validate discount_percentage
+    if (item.discount_percentage !== undefined && item.discount_percentage !== null) {
+      const discountPct = parseFloat(item.discount_percentage);
+      if (isNaN(discountPct) || discountPct < 0 || discountPct > 100) {
+        return res.status(400).json({ error: 'Discount percentage must be between 0 and 100' });
+      }
+    }
+    
+    // Validate discount_type
+    if (item.discount_type && !['amount', 'percentage'].includes(item.discount_type)) {
+      return res.status(400).json({ error: 'Discount type must be either "amount" or "percentage"' });
     }
   }
 
@@ -149,8 +187,23 @@ const validateTransaction = (req, res, next) => {
     return res.status(400).json({ error: 'Payment status must be fully_paid or partially_paid' });
   }
 
-  if (payment_status === 'partially_paid' && (!paid_amount || isNaN(paid_amount) || paid_amount < 0)) {
-    return res.status(400).json({ error: 'Paid amount is required for partially paid transactions' });
+  if (payment_status === 'partially_paid') {
+    if (paid_amount === undefined || paid_amount === null || isNaN(paid_amount) || paid_amount < 0) {
+      return res.status(400).json({ error: 'Paid amount is required and must be a non-negative number for partially paid transactions' });
+    }
+  }
+
+  // Validate with_gst
+  if (with_gst !== undefined && typeof with_gst !== 'boolean') {
+    return res.status(400).json({ error: 'with_gst must be a boolean value' });
+  }
+
+  // Validate previous_balance_paid
+  if (previous_balance_paid !== undefined && previous_balance_paid !== null) {
+    const prevBalance = parseFloat(previous_balance_paid);
+    if (isNaN(prevBalance) || prevBalance < 0) {
+      return res.status(400).json({ error: 'Previous balance paid must be a non-negative number' });
+    }
   }
 
   next();
@@ -163,6 +216,10 @@ module.exports = {
   validateRegister,
   validateTransaction
 };
+
+
+
+
 
 
 
