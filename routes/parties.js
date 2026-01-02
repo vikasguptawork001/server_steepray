@@ -42,8 +42,31 @@ async function checkDuplicateMobileEmail(table, mobile_number, email, excludeId 
 // Get all buyer parties
 router.get('/buyers', authenticateToken, async (req, res) => {
   try {
-    const [parties] = await pool.execute('SELECT * FROM buyer_parties ORDER BY party_name');
-    res.json({ parties });
+    const { page = 1, limit = 50 } = req.query;
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 50;
+    const offset = (pageNum - 1) * limitNum;
+
+    // Get total count
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM buyer_parties');
+    const totalRecords = countResult[0].total;
+    const totalPages = Math.ceil(totalRecords / limitNum);
+
+    // Get paginated data
+    // Note: LIMIT and OFFSET cannot use placeholders in prepared statements, so we use template literals
+    const [parties] = await pool.execute(
+      `SELECT * FROM buyer_parties ORDER BY party_name LIMIT ${limitNum} OFFSET ${offset}`
+    );
+    
+    res.json({ 
+      parties,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        totalRecords,
+        totalPages
+      }
+    });
   } catch (error) {
     console.error('Get buyer parties error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -199,8 +222,31 @@ router.put('/buyers/:id', authenticateToken, async (req, res) => {
 // Get all seller parties
 router.get('/sellers', authenticateToken, async (req, res) => {
   try {
-    const [parties] = await pool.execute('SELECT * FROM seller_parties ORDER BY party_name');
-    res.json({ parties });
+    const { page = 1, limit = 50 } = req.query;
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 50;
+    const offset = (pageNum - 1) * limitNum;
+
+    // Get total count
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM seller_parties');
+    const totalRecords = countResult[0].total;
+    const totalPages = Math.ceil(totalRecords / limitNum);
+
+    // Get paginated data
+    // Note: LIMIT and OFFSET cannot use placeholders in prepared statements, so we use template literals
+    const [parties] = await pool.execute(
+      `SELECT * FROM seller_parties ORDER BY party_name LIMIT ${limitNum} OFFSET ${offset}`
+    );
+    
+    res.json({ 
+      parties,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        totalRecords,
+        totalPages
+      }
+    });
   } catch (error) {
     console.error('Get seller parties error:', error);
     res.status(500).json({ error: 'Server error' });

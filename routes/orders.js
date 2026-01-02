@@ -8,6 +8,11 @@ const router = express.Router();
 // Get order sheet items
 router.get('/', authenticateToken, async (req, res) => {
   try {
+    const { page = 1, limit = 50 } = req.query;
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 50;
+    const offset = (pageNum - 1) * limitNum;
+
     // First, update order sheet based on current item quantities and alert quantities
     await pool.execute(
       `UPDATE order_sheet os
@@ -36,15 +41,36 @@ router.get('/', authenticateToken, async (req, res) => {
          )`
     );
 
+    // Get total count
+    const [countResult] = await pool.execute(
+      `SELECT COUNT(*) as total
+       FROM order_sheet os
+       JOIN items i ON os.item_id = i.id
+       WHERE os.status = 'pending'`
+    );
+    const totalRecords = countResult[0].total;
+    const totalPages = Math.ceil(totalRecords / limitNum);
+
+    // Get paginated data
+    // Note: LIMIT and OFFSET cannot use placeholders in prepared statements, so we use template literals
     const [orders] = await pool.execute(
       `SELECT os.*, i.product_name, i.brand, i.product_code, i.rack_number, i.sale_rate
        FROM order_sheet os
        JOIN items i ON os.item_id = i.id
        WHERE os.status = 'pending'
-       ORDER BY os.created_at DESC`
+       ORDER BY os.created_at DESC
+       LIMIT ${limitNum} OFFSET ${offset}`
     );
 
-    res.json({ orders });
+    res.json({ 
+      orders,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        totalRecords,
+        totalPages
+      }
+    });
   } catch (error) {
     console.error('Get order sheet error:', error);
     res.status(500).json({ error: 'Server error' });
