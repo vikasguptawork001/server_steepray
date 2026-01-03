@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
+const config = require('../config/config');
 const { authenticateToken, authorizeRole } = require('../middleware/auth');
 const { validateLogin, validateRegister } = require('../middleware/validation');
 
@@ -32,15 +33,15 @@ router.post('/login', validateLogin, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    if (!process.env.JWT_SECRET) {
+    if (!config.jwt.secret) {
       console.error('JWT_SECRET is not set in environment variables');
       return res.status(500).json({ error: 'Server configuration error' });
     }
 
     const token = jwt.sign(
       { id: user.id, user_id: user.user_id, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      config.jwt.secret,
+      { expiresIn: config.jwt.expiresIn }
     );
 
     res.json({

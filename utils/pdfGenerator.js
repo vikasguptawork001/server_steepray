@@ -1,5 +1,15 @@
 const PDFDocument = require('pdfkit');
 
+// Helper function to format currency (handles rupee symbol encoding)
+const formatCurrency = (amount) => {
+  try {
+    // Try to use rupee symbol, fallback to Rs. if encoding issue
+    return `₹${amount.toFixed(2)}`;
+  } catch (e) {
+    return `Rs.${amount.toFixed(2)}`;
+  }
+};
+
 const generateBillPDF = (transaction, items, res) => {
   try {
     const doc = new PDFDocument({ margin: 50, size: 'A4' });
@@ -60,38 +70,26 @@ const generateBillPDF = (transaction, items, res) => {
 
     doc.moveDown(2);
 
-    // Items Table Header
+    // Items Table Header - Simplified
     const tableTop = doc.y;
-    doc.fontSize(9).font('Helvetica-Bold');
+    doc.fontSize(10).font('Helvetica-Bold');
     
     let xPos = 50;
     doc.text('Sr.', xPos, tableTop);
     xPos += 30;
-    doc.text('Product ID', xPos, tableTop);
-    xPos += 80;
     doc.text('Product Description', xPos, tableTop);
-    
+    xPos += 180;
+    doc.text('Qty', xPos, tableTop);
+    xPos += 35;
+    doc.text('Rate', xPos, tableTop);
+    xPos += 50;
     if (withGst) {
-      xPos += 120;
-      doc.text('HSN', xPos, tableTop);
-      xPos += 50;
-      doc.text('Rate', xPos, tableTop);
-      xPos += 50;
-      doc.text('Qty', xPos, tableTop);
-      xPos += 40;
-      doc.text('Taxable Value', xPos, tableTop);
-      xPos += 70;
       doc.text('GST%', xPos, tableTop);
-      xPos += 40;
-      doc.text('Amount', xPos, tableTop);
-    } else {
-      xPos += 200;
-      doc.text('Rate', xPos, tableTop);
-      xPos += 50;
-      doc.text('Qty', xPos, tableTop);
-      xPos += 40;
-      doc.text('Amount', xPos, tableTop);
+      xPos += 35;
     }
+    doc.text('Discount', xPos, tableTop);
+    xPos += 55;
+    doc.text('Amount', xPos, tableTop);
 
     // Draw table header line
     doc.moveTo(50, tableTop + 15).lineTo(550, tableTop + 15).stroke();
@@ -102,62 +100,81 @@ const generateBillPDF = (transaction, items, res) => {
     let totalCgst = 0;
     let totalSgst = 0;
 
-    doc.fontSize(8).font('Helvetica');
+    doc.fontSize(9).font('Helvetica');
     items.forEach(item => {
       const saleRate = parseFloat(item.sale_rate) || 0;
       const quantity = parseInt(item.quantity) || 0;
       const itemTotal = saleRate * quantity;
-      const productName = (item.product_name || 'N/A').substring(0, 25);
-      const productCode = (item.product_code || '-').substring(0, 15);
-      const hsn = item.hsn_number || '-';
+      
+      // Truncate product description with ".." if too long
+      let productName = item.product_name || 'N/A';
+      const maxLength = 35; // Maximum characters for product description
+      if (productName.length > maxLength) {
+        productName = productName.substring(0, maxLength - 2) + '..';
+      }
+      
       const taxRate = parseFloat(item.tax_rate) || 0;
 
-      let taxableValue = itemTotal;
+      // Calculate item-level discount (matching backend logic)
+      let itemDiscount = 0;
+      const itemDiscountType = item.discount_type || 'amount';
+      if (itemDiscountType === 'percentage' && item.discount_percentage !== null && item.discount_percentage !== undefined) {
+        itemDiscount = (itemTotal * item.discount_percentage) / 100;
+      } else {
+        itemDiscount = parseFloat(item.discount || 0);
+      }
+      
+      // Ensure discount doesn't exceed item total
+      itemDiscount = Math.min(itemDiscount, itemTotal);
+      
+      const itemTotalAfterDiscount = itemTotal - itemDiscount;
+
+      let taxableValue = itemTotalAfterDiscount;
       let cgst = 0;
       let sgst = 0;
-      let amount = itemTotal;
+      let amount = itemTotalAfterDiscount;
 
       if (withGst && taxRate > 0) {
-        taxableValue = itemTotal / (1 + taxRate / 100);
-        const tax = itemTotal - taxableValue;
+        // GST-inclusive: taxable value = total after discount / (1 + GST/100)
+        taxableValue = itemTotalAfterDiscount / (1 + taxRate / 100);
+        const tax = itemTotalAfterDiscount - taxableValue;
         cgst = tax / 2;
         sgst = tax / 2;
-        amount = itemTotal; // Amount includes GST
+        amount = itemTotalAfterDiscount; // Amount includes GST
         totalTaxableValue += taxableValue;
         totalCgst += cgst;
         totalSgst += sgst;
       } else {
-        totalTaxableValue += itemTotal;
+        totalTaxableValue += itemTotalAfterDiscount;
       }
 
       xPos = 50;
+      // Serial number
       doc.text(serialNumber.toString(), xPos, y);
       xPos += 30;
-      doc.text(productCode, xPos, y);
-      xPos += 80;
+      // Product description (truncated if needed)
       doc.text(productName, xPos, y);
-      
+      xPos += 180;
+      // Quantity
+      doc.text(quantity.toString(), xPos, y);
+      xPos += 35;
+      // Rate
+      doc.text(formatCurrency(saleRate), xPos, y);
+      xPos += 50;
+      // GST% (only for GST invoices)
       if (withGst) {
-        xPos += 120;
-        doc.text(hsn, xPos, y);
-        xPos += 50;
-        doc.text(`₹${saleRate.toFixed(2)}`, xPos, y);
-        xPos += 50;
-        doc.text(quantity.toString(), xPos, y);
-        xPos += 40;
-        doc.text(`₹${taxableValue.toFixed(2)}`, xPos, y);
-        xPos += 70;
         doc.text(`${taxRate}%`, xPos, y);
-        xPos += 40;
-        doc.text(`₹${amount.toFixed(2)}`, xPos, y);
-      } else {
-        xPos += 200;
-        doc.text(`₹${saleRate.toFixed(2)}`, xPos, y);
-        xPos += 50;
-        doc.text(quantity.toString(), xPos, y);
-        xPos += 40;
-        doc.text(`₹${amount.toFixed(2)}`, xPos, y);
+        xPos += 35;
       }
+      // Discount
+      if (itemDiscount > 0) {
+        doc.text(`-${formatCurrency(itemDiscount)}`, xPos, y);
+      } else {
+        doc.text('-', xPos, y);
+      }
+      xPos += 55;
+      // Amount
+      doc.text(formatCurrency(amount), xPos, y);
 
       y += 18;
       serialNumber++;
@@ -174,29 +191,46 @@ const generateBillPDF = (transaction, items, res) => {
 
     doc.fontSize(10).font('Helvetica');
     
+    // Calculate total discount from all items (calculate once, use everywhere)
+    let totalItemDiscount = 0;
+    items.forEach(item => {
+      const saleRate = parseFloat(item.sale_rate) || 0;
+      const quantity = parseInt(item.quantity) || 0;
+      const itemTotal = saleRate * quantity;
+      
+      let itemDiscount = 0;
+      const itemDiscountType = item.discount_type || 'amount';
+      if (itemDiscountType === 'percentage' && item.discount_percentage !== null && item.discount_percentage !== undefined) {
+        itemDiscount = (itemTotal * item.discount_percentage) / 100;
+      } else {
+        itemDiscount = parseFloat(item.discount || 0);
+      }
+      itemDiscount = Math.min(itemDiscount, itemTotal);
+      totalItemDiscount += itemDiscount;
+    });
+    
     if (withGst) {
-      const taxableAfterDiscount = totalTaxableValue - discount;
       doc.text('Taxable Amount:', 350, y);
-      doc.text(`₹${taxableAfterDiscount.toFixed(2)}`, 450, y, { align: 'right' });
+      doc.text(formatCurrency(totalTaxableValue), 450, y, { align: 'right' });
       y += 15;
-      if (discount > 0) {
-        doc.text('Discount:', 350, y);
-        doc.text(`-₹${discount.toFixed(2)}`, 450, y, { align: 'right' });
+      if (totalItemDiscount > 0) {
+        doc.text('Total Discount:', 350, y);
+        doc.text(`-${formatCurrency(totalItemDiscount)}`, 450, y, { align: 'right' });
         y += 15;
       }
       doc.text('CGST:', 350, y);
-      doc.text(`₹${totalCgst.toFixed(2)}`, 450, y, { align: 'right' });
+      doc.text(formatCurrency(totalCgst), 450, y, { align: 'right' });
       y += 15;
       doc.text('SGST:', 350, y);
-      doc.text(`₹${totalSgst.toFixed(2)}`, 450, y, { align: 'right' });
+      doc.text(formatCurrency(totalSgst), 450, y, { align: 'right' });
       y += 15;
     } else {
       doc.text('Subtotal:', 350, y);
-      doc.text(`₹${subtotal.toFixed(2)}`, 450, y, { align: 'right' });
+      doc.text(formatCurrency(totalTaxableValue), 450, y, { align: 'right' });
       y += 15;
-      if (discount > 0) {
-        doc.text('Discount:', 350, y);
-        doc.text(`-₹${discount.toFixed(2)}`, 450, y, { align: 'right' });
+      if (totalItemDiscount > 0) {
+        doc.text('Total Discount:', 350, y);
+        doc.text(`-${formatCurrency(totalItemDiscount)}`, 450, y, { align: 'right' });
         y += 15;
       }
     }
@@ -205,15 +239,15 @@ const generateBillPDF = (transaction, items, res) => {
     doc.moveTo(350, y).lineTo(550, y).stroke();
     y += 15;
     doc.text('Invoice Amount:', 350, y);
-    doc.text(`₹${totalAmount.toFixed(2)}`, 450, y, { align: 'right' });
+    doc.text(formatCurrency(totalAmount), 450, y, { align: 'right' });
     y += 20;
     doc.fontSize(10).font('Helvetica');
     doc.text('Paid Amount:', 350, y);
-    doc.text(`₹${paidAmount.toFixed(2)}`, 450, y, { align: 'right' });
+    doc.text(formatCurrency(paidAmount), 450, y, { align: 'right' });
     y += 15;
     doc.fontSize(11).font('Helvetica-Bold');
     doc.text('Balance Amount:', 350, y);
-    doc.text(`₹${balanceAmount.toFixed(2)}`, 450, y, { align: 'right' });
+    doc.text(formatCurrency(balanceAmount), 450, y, { align: 'right' });
 
     // Remarks and Summary Box
     y += 30;
@@ -234,16 +268,21 @@ const generateBillPDF = (transaction, items, res) => {
     doc.font('Helvetica');
     doc.fontSize(9);
     
+    // Use the same totalItemDiscount calculated above
     let summaryYPos = summaryY + 15;
-    doc.text(`Taxable Amount: ₹${withGst ? (totalTaxableValue - discount).toFixed(2) : (subtotal - discount).toFixed(2)}`, summaryBoxX + 10, summaryYPos);
+    doc.text(`Taxable Amount: ${formatCurrency(totalTaxableValue)}`, summaryBoxX + 10, summaryYPos);
     summaryYPos += 12;
-    if (withGst) {
-      doc.text(`CGST: ₹${totalCgst.toFixed(2)}`, summaryBoxX + 10, summaryYPos);
-      summaryYPos += 12;
-      doc.text(`SGST: ₹${totalSgst.toFixed(2)}`, summaryBoxX + 10, summaryYPos);
+    if (totalItemDiscount > 0) {
+      doc.text(`Total Discount: -${formatCurrency(totalItemDiscount)}`, summaryBoxX + 10, summaryYPos);
       summaryYPos += 12;
     }
-    doc.text(`Invoice Amount: ₹${totalAmount.toFixed(2)}`, summaryBoxX + 10, summaryYPos);
+    if (withGst) {
+      doc.text(`CGST: ${formatCurrency(totalCgst)}`, summaryBoxX + 10, summaryYPos);
+      summaryYPos += 12;
+      doc.text(`SGST: ${formatCurrency(totalSgst)}`, summaryBoxX + 10, summaryYPos);
+      summaryYPos += 12;
+    }
+    doc.text(`Invoice Amount: ${formatCurrency(totalAmount)}`, summaryBoxX + 10, summaryYPos);
 
     // Footer
     y = doc.page.height - 100;

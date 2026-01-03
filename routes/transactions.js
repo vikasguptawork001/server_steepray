@@ -280,7 +280,7 @@ router.post('/return', authenticateToken, async (req, res) => {
 
       // Process each item
       for (const itemData of itemsArray) {
-        const { item_id, quantity, return_amount } = itemData;
+        const { item_id, quantity, return_amount, discount, discount_type, discount_percentage } = itemData;
 
         if (!item_id || !quantity || quantity <= 0) {
           throw new Error('Valid item_id and quantity are required for all items');
@@ -300,6 +300,21 @@ router.post('/return', authenticateToken, async (req, res) => {
         const purchaseRate = itemDetails[0].purchase_rate || 0;
         const saleRate = itemDetails[0].sale_rate || 0;
 
+        // Calculate item total and discount (similar to sale transaction)
+        const itemTotal = saleRate * quantity;
+        let itemDiscount = 0;
+        const itemDiscountType = discount_type || 'amount';
+        
+        if (itemDiscountType === 'percentage' && discount_percentage !== null && discount_percentage !== undefined) {
+          itemDiscount = (itemTotal * discount_percentage) / 100;
+        } else {
+          itemDiscount = parseFloat(discount || 0);
+        }
+        
+        // Ensure discount doesn't exceed item total
+        itemDiscount = Math.min(itemDiscount, itemTotal);
+        const itemTotalAfterDiscount = itemTotal - itemDiscount;
+
         // For buyer returns: subtract from stock only (no balance transactions)
         if (finalPartyType === 'buyer') {
           if (currentQuantity < quantity) {
@@ -313,18 +328,46 @@ router.post('/return', authenticateToken, async (req, res) => {
           );
 
           // For buyer returns, don't record return_amount (set to 0) - just track the return
-          await connection.execute(
-            `INSERT INTO return_transactions (seller_party_id, buyer_party_id, party_type, item_id, quantity, return_amount, return_date, reason)
-             VALUES (?, ?, ?, ?, ?, 0, CURDATE(), ?)`,
-            [
-              seller_party_id || null,
-              buyer_party_id || null,
-              finalPartyType,
-              item_id,
-              quantity,
-              reason || 'Buyer return - stock quantity decreased'
-            ]
-          );
+          // Check if discount columns exist
+          const [discountColumns] = await connection.execute(`
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_SCHEMA = DATABASE() 
+            AND TABLE_NAME = 'return_transactions' 
+            AND COLUMN_NAME IN ('discount', 'discount_type', 'discount_percentage')
+          `);
+          const hasDiscountColumns = discountColumns.length > 0;
+
+          if (hasDiscountColumns) {
+            await connection.execute(
+              `INSERT INTO return_transactions (seller_party_id, buyer_party_id, party_type, item_id, quantity, return_amount, discount, discount_type, discount_percentage, return_date, reason)
+               VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, CURDATE(), ?)`,
+              [
+                seller_party_id || null,
+                buyer_party_id || null,
+                finalPartyType,
+                item_id,
+                quantity,
+                itemDiscount || 0,
+                itemDiscountType,
+                discount_percentage || null,
+                reason || 'Buyer return - stock quantity decreased'
+              ]
+            );
+          } else {
+            await connection.execute(
+              `INSERT INTO return_transactions (seller_party_id, buyer_party_id, party_type, item_id, quantity, return_amount, return_date, reason)
+               VALUES (?, ?, ?, ?, ?, 0, CURDATE(), ?)`,
+              [
+                seller_party_id || null,
+                buyer_party_id || null,
+                finalPartyType,
+                item_id,
+                quantity,
+                reason || 'Buyer return - stock quantity decreased'
+              ]
+            );
+          }
         } else {
           // For seller returns: add to stock
           await connection.execute(
@@ -332,23 +375,54 @@ router.post('/return', authenticateToken, async (req, res) => {
             [quantity, item_id]
           );
 
-          // Calculate return amount (use provided return_amount or calculate from sale_rate)
-          const calculatedReturnAmount = return_amount || (saleRate * quantity);
+          // Calculate return amount (use provided return_amount or calculate from sale_rate after discount)
+          const calculatedReturnAmount = return_amount !== undefined && return_amount !== null 
+            ? return_amount 
+            : itemTotalAfterDiscount;
           totalReturnAmount += calculatedReturnAmount;
           
-          await connection.execute(
-            `INSERT INTO return_transactions (seller_party_id, buyer_party_id, party_type, item_id, quantity, return_amount, return_date, reason)
-             VALUES (?, ?, ?, ?, ?, ?, CURDATE(), ?)`,
-            [
-              seller_party_id || null,
-              buyer_party_id || null,
-              finalPartyType,
-              item_id,
-              quantity,
-              calculatedReturnAmount,
-              reason || 'Return from seller'
-            ]
-          );
+          // Check if discount columns exist
+          const [discountColumns] = await connection.execute(`
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_SCHEMA = DATABASE() 
+            AND TABLE_NAME = 'return_transactions' 
+            AND COLUMN_NAME IN ('discount', 'discount_type', 'discount_percentage')
+          `);
+          const hasDiscountColumns = discountColumns.length > 0;
+
+          if (hasDiscountColumns) {
+            await connection.execute(
+              `INSERT INTO return_transactions (seller_party_id, buyer_party_id, party_type, item_id, quantity, return_amount, discount, discount_type, discount_percentage, return_date, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), ?)`,
+              [
+                seller_party_id || null,
+                buyer_party_id || null,
+                finalPartyType,
+                item_id,
+                quantity,
+                calculatedReturnAmount,
+                itemDiscount || 0,
+                itemDiscountType,
+                discount_percentage || null,
+                reason || 'Return from seller'
+              ]
+            );
+          } else {
+            await connection.execute(
+              `INSERT INTO return_transactions (seller_party_id, buyer_party_id, party_type, item_id, quantity, return_amount, return_date, reason)
+               VALUES (?, ?, ?, ?, ?, ?, CURDATE(), ?)`,
+              [
+                seller_party_id || null,
+                buyer_party_id || null,
+                finalPartyType,
+                item_id,
+                quantity,
+                calculatedReturnAmount,
+                reason || 'Return from seller'
+              ]
+            );
+          }
         }
 
         itemIdsToCheck.push(item_id);

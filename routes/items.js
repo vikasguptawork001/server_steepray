@@ -274,6 +274,18 @@ router.post('/', authenticateToken, authorizeRole('admin', 'super_admin'), uploa
       remarks
     } = req.body;
 
+    // Parse tax_rate to ensure it's a number (FormData sends strings)
+    const parsedTaxRate = tax_rate !== undefined && tax_rate !== null && tax_rate !== '' 
+      ? parseFloat(tax_rate) 
+      : 18;
+    const validTaxRates = [5, 18, 28];
+    const finalTaxRate = !isNaN(parsedTaxRate) && validTaxRates.includes(parsedTaxRate) 
+      ? parsedTaxRate 
+      : 18;
+    
+    // Debug log to verify tax_rate is being received correctly
+    console.log('Received tax_rate:', tax_rate, 'Parsed:', parsedTaxRate, 'Final:', finalTaxRate);
+
     // Validation
     if (!product_name || product_name.trim() === '') {
       return res.status(400).json({ error: 'Product name is required' });
@@ -332,7 +344,7 @@ router.post('/', authenticateToken, authorizeRole('admin', 'super_admin'), uploa
         product_code ? product_code.trim() : null,
         brand ? brand.trim() : null,
         hsn_number ? hsn_number.trim() : null,
-        tax_rate || 0,
+        finalTaxRate,
         sale_rate,
         purchase_rate,
         alert_quantity || 0,
